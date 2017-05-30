@@ -68,6 +68,7 @@ type fastFastaReader struct {
 
 	identifierBytes []byte
 	lastBytes       []byte
+	sawSequence     bool
 }
 
 func (f *fastFastaReader) Progress() float64 {
@@ -103,6 +104,7 @@ func Open(filename string) (Reader, error) {
 	f := &fastFastaReader{f: ff, r: r}
 	f.br = bufio.NewReader(r)
 	f.lastErr = errNotStarted
+	f.sawSequence = true
 
 	bb, err := f.br.Peek(1)
 	if len(bb) != 1 {
@@ -115,6 +117,12 @@ func Open(filename string) (Reader, error) {
 }
 
 func (f *fastFastaReader) Next() bool {
+	if !f.sawSequence {
+		// if a sequence reading method wasn't called, we'd
+		// get stuck returning the same header.
+		f.skipSequence()
+		f.sawSequence = false
+	}
 	if f.lastErr == errNotStarted {
 		f.identifierBytes, f.lastErr = f.br.ReadBytes('\n')
 	}
@@ -161,6 +169,7 @@ func (f *fastFastaReader) Sequence() string {
 			return string(seq)
 		}
 
+		f.sawSequence = true
 		seq = append(seq, f.lastBytes[:len(f.lastBytes)-1]...)
 	}
 }
@@ -178,9 +187,34 @@ func (f *fastFastaReader) SequenceBytes(eachbyte func(byte)) error {
 				return nil
 			}
 
+			f.sawSequence = true
 			for _, b := range f.lastBytes[:len(f.lastBytes)-1] {
 				eachbyte(b)
 			}
+		}
+		if f.lastErr == io.EOF {
+			return nil
+		}
+		if f.lastErr != nil {
+			return f.lastErr
+		}
+	}
+}
+
+func (f *fastFastaReader) skipSequence() error {
+	// literally the same as SequenceBytes, we just ignore the bytes...
+	for {
+		f.lastBytes, f.lastErr = f.br.ReadSlice('\n')
+		if f.lastErr == bufio.ErrBufferFull {
+			f.lastErr = nil
+		}
+
+		if len(f.lastBytes) > 1 {
+			if f.lastBytes[0] == '>' {
+				f.identifierBytes = f.lastBytes
+				return nil
+			}
+			f.sawSequence = true
 		}
 		if f.lastErr == io.EOF {
 			return nil
